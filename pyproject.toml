@@ -5,10 +5,14 @@ description = "MCP server pour legifrance"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "mcp[cli]>=1.6.0",
+    # Capped below 2.0: mcp 2.x restructures the server API (FastMCP-based)
+    # that src/server.py's Server/Tool/TextContent usage isn't written against.
+    "mcp[cli]>=1.6.0,<2.0.0",
     "typer>=0.12.0",
     "click>=8.1.7",
-    "pydantic>=2.0",
+    # mcp==1.6.0 imports pydantic's private eval_type_backport, removed in
+    # pydantic 2.14 - pin below that until the mcp floor is raised past 1.6.0.
+    "pydantic>=2.13,<2.14",
     "requests>=2.32.3",
     "load-dotenv>=0.1.0",
     "pylegifrance",
