@@ -50,6 +50,19 @@ async def test_returns_formatted_articles_on_success(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_proximite_is_forwarded_to_text_builder(monkeypatch):
+    monkeypatch.setenv("LEGIFRANCE_CLIENT_ID", "id")
+    monkeypatch.setenv("LEGIFRANCE_CLIENT_SECRET", "secret")
+    with patch("server.Code") as mock_code_cls:
+        builder = mock_code_cls.return_value.search.return_value.in_code.return_value.with_formatter.return_value
+        builder.text.return_value.execute.return_value = []
+        await call_rechercher_code(
+            {"search": "bail commercial", "code_name": "Code civil", "proximite": 3}
+        )
+    assert builder.text.call_args.kwargs["proximity"] == 3
+
+
+@pytest.mark.asyncio
 async def test_num_article_champ_uses_article_number_builder(monkeypatch):
     monkeypatch.setenv("LEGIFRANCE_CLIENT_ID", "id")
     monkeypatch.setenv("LEGIFRANCE_CLIENT_SECRET", "secret")

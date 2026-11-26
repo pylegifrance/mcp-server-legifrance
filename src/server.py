@@ -193,7 +193,7 @@ async def call_rechercher_code(arguments: dict) -> list[TextContent]:
         builder = builder.article_number(search_text)
     elif search_text:
         field = _CHAMP_TO_TYPE_CHAMP_CODE.get(champ, TypeChampCode.ALL) if champ else TypeChampCode.ALL
-        builder = builder.text(search_text, in_field=field)
+        builder = builder.text(search_text, in_field=field, proximity=arguments.get("proximite"))
 
     page_size = _clamp_page_size(100 if arguments.get("fetch_all") else arguments.get("page_size"))
     if page_size:
@@ -232,6 +232,8 @@ async def call_rechercher_texte_legal(arguments: dict) -> list[TextContent]:
         kwargs["type_recherche"] = _normalize_type_recherche(kwargs["type_recherche"])
     if "page_size" in kwargs:
         kwargs["page_size"] = _clamp_page_size(kwargs["page_size"])
+    if arguments.get("proximite") is not None:
+        kwargs["proximity"] = arguments["proximite"]
     query = LodaSearchRequest(**kwargs)
 
     results = Loda(get_legifrance_client()).search(query)
@@ -250,6 +252,7 @@ _JURI_ARG_MAP = {
     "sort": "sort",
     "champ": "field",
     "type_recherche": "search_type",
+    "proximite": "proximity",
     "juridiction_judiciaire": "juridiction_judiciaire",
     "page_size": "page_size",
     "fetch_all": "fetch_all",
@@ -424,8 +427,9 @@ async def call_list_tools() -> List[Tool]:
                 - search: Mots-clés de recherche ou numéro d'article
                 - champ: Champ de recherche ("ALL", "TITLE", "TABLE", "NUM_ARTICLE", "ARTICLE")
                 - type_recherche: Type de recherche ("TOUS_LES_MOTS_DANS_UN_CHAMP", "EXPRESSION_EXACTE", "AU_MOINS_UN_MOT")
+                - proximite: Distance maximale en mots entre les termes recherchés
                 - page_size: Nombre de résultats (max 100)
-                
+
             Exemples:
                 - Pour l'article 7 de la loi 78-17: {text_id="78-17", search="7", champ="NUM_ARTICLE"}
                 - On cherche les conditions de validité de la signature électronique : {search="signature électronique validité conditions"}
@@ -437,6 +441,7 @@ async def call_list_tools() -> List[Tool]:
                     "text_id": {"type": "string"},
                     "champ": {"type": "string", "enum": ["ALL", "TITLE", "TABLE", "NUM_ARTICLE", "ARTICLE"]},
                     "type_recherche": {"type": "string", "enum": ["TOUS_LES_MOTS_DANS_UN_CHAMP", "EXPRESSION_EXACTE", "AU_MOINS_UN_MOT"]},
+                    "proximite": {"type": "integer", "minimum": 1, "maximum": 100},
                     "page_size": {"type": "integer", "maximum": 100}
                 }
             }
@@ -452,9 +457,10 @@ async def call_list_tools() -> List[Tool]:
                 - champ: Champ de recherche ("ALL", "TITLE", "TABLE", "NUM_ARTICLE", "ARTICLE")
                 - sort: Tri des résultats ("PERTINENCE", "DATE_ASC", "DATE_DESC")
                 - type_recherche: Type de recherche
+                - proximite: Distance maximale en mots entre les termes recherchés
                 - page_size: Nombre de résultats (max 100)
                 - fetch_all: Récupérer tous les résultats
-                
+
             Exemples:
                 - Pour le PACS dans le Code civil: {search="pacte civil de solidarité", code_name="Code civil"}
             """,
@@ -466,6 +472,7 @@ async def call_list_tools() -> List[Tool]:
                     "champ": {"type": "string"},
                     "sort": {"type": "string", "enum": ["PERTINENCE", "DATE_ASC", "DATE_DESC"]},
                     "type_recherche": {"type": "string"},
+                    "proximite": {"type": "integer", "minimum": 1, "maximum": 100},
                     "page_size": {"type": "integer", "maximum": 100},
                     "fetch_all": {"type": "boolean"}
                 },
@@ -483,6 +490,7 @@ async def call_list_tools() -> List[Tool]:
                 - sort: Tri des résultats ("PERTINENCE", "DATE_DESC", "DATE_ASC")
                 - champ: Champ de recherche ("ALL", "TITLE", "ABSTRATS", "TEXTE", "RESUMES", "NUM_AFFAIRE")
                 - type_recherche: Type de recherche
+                - proximite: Distance maximale en mots entre les termes recherchés
                 - page_size: Nombre de résultats (max. 100)
                 - fetch_all: Récupérer tous les résultats
                 - juri_keys: Mots-clés pour extraire des champs comme 'titre'. Par défaut, le titre, le texte et les résumés sont extraits
@@ -505,6 +513,7 @@ async def call_list_tools() -> List[Tool]:
                     "sort": {"type": "string", "enum": ["PERTINENCE", "DATE_DESC", "DATE_ASC"]},
                     "champ": {"type": "string"},
                     "type_recherche": {"type": "string"},
+                    "proximite": {"type": "integer", "minimum": 1, "maximum": 100},
                     "page_size": {"type": "integer", "maximum": 100},
                     "fetch_all": {"type": "boolean"},
                     "juri_keys": {"type": "array", "items": {"type": "string"}},

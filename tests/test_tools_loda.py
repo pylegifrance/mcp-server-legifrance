@@ -39,3 +39,16 @@ async def test_normalizes_type_recherche_before_building_query(monkeypatch):
 
     query = mock_loda_cls.return_value.search.call_args.args[0]
     assert query.type_recherche.value == "EXACTE"
+
+
+@pytest.mark.asyncio
+async def test_proximite_is_forwarded_as_proximity(monkeypatch):
+    """Légifrance's "proximité N mots" search option."""
+    monkeypatch.setenv("LEGIFRANCE_CLIENT_ID", "id")
+    monkeypatch.setenv("LEGIFRANCE_CLIENT_SECRET", "secret")
+    with patch("server.Loda") as mock_loda_cls:
+        mock_loda_cls.return_value.search.return_value = []
+        await call_rechercher_texte_legal({"search": "dommages intérêts", "proximite": 3})
+
+    query = mock_loda_cls.return_value.search.call_args.args[0]
+    assert query.proximity == 3

@@ -49,3 +49,16 @@ async def test_normalizes_search_type_before_building_query(monkeypatch):
 
     query = mock_juri_cls.return_value.search.call_args.args[0]
     assert query.search_type.value == "UN_DES_MOTS"
+
+
+@pytest.mark.asyncio
+async def test_proximite_is_forwarded_as_proximity(monkeypatch):
+    """Légifrance's "proximité N mots" search option."""
+    monkeypatch.setenv("LEGIFRANCE_CLIENT_ID", "id")
+    monkeypatch.setenv("LEGIFRANCE_CLIENT_SECRET", "secret")
+    with patch("server.JuriAPI") as mock_juri_cls:
+        mock_juri_cls.return_value.search.return_value = []
+        await call_rechercher_jurisprudence({"search": "dommages intérêts", "proximite": 3})
+
+    query = mock_juri_cls.return_value.search.call_args.args[0]
+    assert query.proximity == 3
