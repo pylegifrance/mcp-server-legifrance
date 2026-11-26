@@ -26,10 +26,11 @@ from typing import Any, Dict, Optional, List, Sequence
 from functools import wraps
 from datetime import datetime
 
-import requests
 from dotenv import load_dotenv
 from mcp.server import Server
 from mcp.types import Tool, TextContent
+
+from pylegifrance import ApiConfig, LegifranceClient
 
 # Configuration du logging
 logging.basicConfig(level=logging.INFO)
@@ -38,17 +39,15 @@ logger = logging.getLogger("legifrance_mcp")
 # Chargement des variables d'environnement
 load_dotenv()
 
-# Constantes et configuration
-API_KEY = os.getenv('DASSIGNIES_API_KEY')
-API_URL = os.getenv('DASSIGNIES_API_URL')
 
-if not API_KEY or not API_URL:
-    raise ValueError("Les variables d'environnement LAB_DASSIGNIES_API_KEY et LEGAL_API_URL doivent être définies")
+def get_legifrance_client() -> LegifranceClient:
+    """Construit un client Légifrance authentifié directement via PISTE.
 
-HEADERS = {
-    "accept": "*/*",
-    "Content-Type": "application/json"
-}
+    Lit LEGIFRANCE_CLIENT_ID/LEGIFRANCE_CLIENT_SECRET (et, optionnellement,
+    PISTE_ENV pour basculer sandbox/production) depuis l'environnement.
+    """
+    return LegifranceClient(ApiConfig.from_env())
+
 
 # Création du serveur MCP
 server = Server("legifrance")

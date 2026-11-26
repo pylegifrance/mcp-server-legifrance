@@ -35,13 +35,16 @@ Le serveur prend en charge les fonctionnalités suivantes:
 
 Les autres fonds Legifrance seront bientôt implémentés. 
 
-Si vous souhaitez accéder directement à l'API Legifrance pour connecter votre propre serveur MCP, 
-c'est par ici : [https://lab.dassignies.law](https://lab.dassignies.law/api/docs) ou [linkedin](https://fr.linkedin.com/in/dassignies)
+Ce fork authentifie directement auprès de PISTE (le portail officiel DILA) via
+la bibliothèque [pylegifrance](https://github.com/pylegifrance/pylegifrance),
+plutôt que via un proxy tiers.
 
 ## Prérequis
 
-- Python 3.9+
-- Clé API pour Legifrance (à obtenir auprès de [lab.dassignies.law](https://lab.dassignies.fr/))
+- Python 3.12+
+- Un compte [PISTE](https://piste.gouv.fr/registration) avec une application
+  souscrite aux API **Légifrance** et **Judilibre** (CGU acceptées pour les
+  deux, en sandbox comme en production)
 - Un modèle compatible avec le protocole MCP (comme Claude desktop)
 
 ## Installation
@@ -55,24 +58,26 @@ source venv/bin/activate  # Sur Windows: venv\Scripts\activate
 uv venv .venv 
 source .venv/bin/activate  # Sur Windows: venv\Scripts\activate
 ```
-2. Installer via pip:
+2. Installer les dépendances (ce fork dépend d'un clone local de
+   [pylegifrance](https://github.com/pylegifrance/pylegifrance), cloné en
+   répertoire frère de ce projet):
 ```bash
-pip install git+https://github.com/rdassignies/mcp-server-legifrance.git
-```
-
-3. Installer via uv
-```bash
-uv pip install git+https://github.com/rdassignies/mcp-server-legifrance.git
+uv sync
 ```
 
 
-4. Créez un fichier `.env` à la racine du projet avec vos identifiants:
+4. Créez un fichier `.env` à la racine du projet avec vos identifiants PISTE:
 ```
-DASSIGNIES_API_KEY=votre_clé_api
-DASSIGNIES_API_URL=https://lab.dassignies.law/api/ # ou l'URL correspondante
+LEGIFRANCE_CLIENT_ID=votre_client_id
+LEGIFRANCE_CLIENT_SECRET=votre_client_secret
+PISTE_ENV=sandbox  # ou "production" ; "sandbox" par défaut si omis
+JUDILIBRE_KEY_ID=votre_key_id  # requis pour le tool rechercher_jurisprudence_judilibre
 ```
 
-Pour obtenir vos clés API de test, merci de me contacter via  [LinkedIn](https://www.linkedin.com/in/dassignies/) 
+Ces identifiants s'obtiennent sur [piste.gouv.fr](https://piste.gouv.fr/registration) —
+voir la FAQ officielle de l'[API Légifrance](https://www.legifrance.gouv.fr/contenu/pied-de-page/foire-aux-questions-api)
+pour la procédure complète (création de compte, consentement aux CGU par API,
+puis souscription de l'application).
 
 ## Utilisation
 

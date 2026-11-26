@@ -3,7 +3,7 @@ name = "mcp-server-legifrance"
 version = "0.1.0"
 description = "MCP server pour legifrance"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "mcp[cli]>=1.6.0",
     "typer>=0.12.0",
@@ -11,4 +11,19 @@ dependencies = [
     "pydantic>=2.0",
     "requests>=2.32.3",
     "load-dotenv>=0.1.0",
+    "pylegifrance",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+    "pytest-asyncio>=0.24.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.uv.sources]
+pylegifrance = { path = "../pylegifrance", editable = true }
