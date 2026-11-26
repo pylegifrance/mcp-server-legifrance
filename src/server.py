@@ -346,7 +346,14 @@ async def call_get_text_history(arguments: dict) -> list[TextContent]:
 
     sections = []
 
-    versions = texte.versions()
+    try:
+        versions = texte.versions()
+    except Exception:
+        # consult/loda/versions is a separate API call from the text fetch
+        # itself and can fail independently (observed live: a 403 even
+        # when the text fetches fine) — the rest of the report still
+        # stands on its own, so this degrades instead of failing the tool.
+        versions = []
     if versions:
         lines = ["## Versions"]
         for version in versions:

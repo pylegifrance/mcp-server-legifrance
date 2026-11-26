@@ -68,6 +68,27 @@ async def test_includes_version_history_section(monkeypatch):
     assert "VIGUEUR" in result[0].text
 
 
+@pytest.mark.asyncio
+async def test_versions_failure_does_not_crash_the_tool(monkeypatch):
+    """.versions() hits a separate API call that can fail independently
+    (observed live: consult/loda/versions can 403 even when the text
+    itself fetches fine) -- that must degrade gracefully, not crash the
+    whole tool call."""
+    monkeypatch.setenv("LEGIFRANCE_CLIENT_ID", "id")
+    monkeypatch.setenv("LEGIFRANCE_CLIENT_SECRET", "secret")
+
+    texte = MagicMock()
+    texte.format_modifications_report.return_value = "Aucun impact disponible."
+    texte.to_markdown.return_value = "## Loi 78-17\n\ncontenu"
+    texte.versions.side_effect = Exception("API client error 403 - ...")
+
+    with patch("server.Loda") as mock_loda_cls:
+        mock_loda_cls.return_value.fetch.return_value = texte
+        result = await call_get_text_history({"text_id": "78-17"})
+
+    assert "Loi 78-17" in result[0].text
+
+
 def test_resolve_loda_text_returns_none_when_search_raises():
     loda = MagicMock()
     loda.fetch.return_value = None
