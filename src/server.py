@@ -428,7 +428,13 @@ async def list_tools() -> List[Tool]:
     ]
 
 @server.call_tool()
-@rate_limit(calls=5, period=1.0)  # Limite à 5 appels par seconde
+# Note: ce quota n'est pas celui de l'ancien proxy dassignies.law (qui imposait
+# 5 appels/s à ses propres utilisateurs). PISTE applique un quota propre à
+# chaque application, non publié publiquement : consultez le vôtre sur
+# piste.gouv.fr (Applications > Actions > Consulter les quotas) et ajustez
+# cette valeur en conséquence. 5/s est conservé ici comme valeur de départ
+# prudente en l'absence de données sur votre quota réel.
+@rate_limit(calls=5, period=1.0)
 async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
     """
     Gère les appels aux outils juridiques.
