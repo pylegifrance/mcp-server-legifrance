@@ -212,6 +212,24 @@ async def call_rechercher_judilibre(arguments: dict) -> list[TextContent]:
     return [TextContent(type="text", text="\n\n---\n\n".join(parts))]
 
 
+_NO_IMPACT_SENTINEL = "Aucun impact disponible."
+
+
+async def call_get_text_history(arguments: dict) -> list[TextContent]:
+    """Implémente le tool get_text_history via pylegifrance.fonds.loda.Loda."""
+    text_id = arguments.get("text_id", "")
+    texte = Loda(get_legifrance_client()).fetch(text_id)
+
+    if texte is None:
+        return [TextContent(type="text", text="Aucun résultat.")]
+
+    report = texte.format_modifications_report()
+    if report.strip() == _NO_IMPACT_SENTINEL:
+        report = texte.to_markdown()
+
+    return [TextContent(type="text", text=report)]
+
+
 # Création du serveur MCP
 server = Server("legifrance")
 
@@ -385,6 +403,27 @@ async def list_tools() -> List[Tool]:
                 },
                 "required": ["search"]
             }
+        ),
+        Tool(
+            name="get_text_history",
+            description="""
+            Retourne l'historique des modifications apportées par un texte
+            légal (loi, ordonnance, décret, arrêté) aux articles qu'il modifie,
+            crée ou abroge.
+
+            Paramètres:
+                - text_id: Le numéro du texte (format AAAA-NUMERO)
+
+            Exemples:
+                - Historique des impacts de la loi 78-17: {text_id="78-17"}
+            """,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "text_id": {"type": "string"}
+                },
+                "required": ["text_id"]
+            }
         )
     ]
 
@@ -415,6 +454,9 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
 
         elif name == "rechercher_jurisprudence_judilibre":
             return await call_rechercher_judilibre(arguments)
+
+        elif name == "get_text_history":
+            return await call_get_text_history(arguments)
 
         else:
             raise ValueError(f"Outil inconnu: {name}")
