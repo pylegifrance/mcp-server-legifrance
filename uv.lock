@@ -1207,10 +1207,14 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "basedpyright", specifier = ">=1.40.2" },
+    { name = "mypy", specifier = ">=2.4.1" },
     { name = "pre-commit", specifier = ">=3.4.0" },
     { name = "pytest", specifier = ">=8.3.5" },
     { name = "pytest-bdd", specifier = ">=8.1.0" },
+    { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "twine", specifier = ">=4.0.2" },
+    { name = "types-requests", specifier = ">=2.33.0.20261030" },
 ]
 
 [[package]]
