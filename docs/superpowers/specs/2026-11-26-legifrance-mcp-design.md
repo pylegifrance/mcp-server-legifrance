@@ -65,12 +65,37 @@ Légifrance and Judilibre APIs.
    ground (database-producer rights, a ToS built around the API as the
    intended reuse channel, no guarantee against being cut off) than a
    free, documented, sanctioned API built for exactly this purpose.
-2. **Use the official PISTE APIs (Légifrance + Judilibre) directly.**
-   Chosen. Free, stable, documented, same data, officially sanctioned
-   for programmatic reuse.
+2. **Build fully from scratch against the official PISTE APIs.** Most
+   control, but duplicates work already done well elsewhere.
+3. **Use existing open-source prior art instead of building fresh.**
+   Several Légifrance/Judilibre MCP servers already exist. The most
+   relevant: `pylegifrance/pylegifrance` (actively maintained Python
+   library wrapping Légifrance's codes/LODA/JURI search with direct
+   PISTE OAuth2 auth) and `pylegifrance/mcp-server-legifrance` (an MCP
+   server with near-matching tools, but stale — last touched mid-2025 —
+   and its `server.py` routes every call through a third-party proxy
+   (`lab.dassignies.law`) requiring an API key obtained informally from
+   its maintainer, rather than using the `pylegifrance` library it
+   claims to be built on, or the PISTE credentials already in hand for
+   this project.
 
-Only one approach survives real consideration; recorded here for the
-record rather than as a live tradeoff.
+**Chosen: a hybrid of 2 and 3.** Fork both repos (`jfenal/pylegifrance`,
+`jfenal/mcp-server-legifrance`, both with `upstream` remotes pointing at
+`pylegifrance/*`) rather than depending on them unmodified or rebuilding
+from zero:
+
+- **Server fork**: keep its existing tool shape (`rechercher_code`,
+  `rechercher_dans_texte_legal`, `rechercher_jurisprudence_judiciaire`,
+  plus the `agent_juridique_expert` prompt) but replace its proxy-backed
+  `make_api_request` with direct calls into the `pylegifrance` library
+  (`fonds.code`, `fonds.loda`, `fonds.juri`), authenticated via the
+  project's own PISTE sandbox credentials instead of a third-party key.
+- **Library fork**: add a new `fonds/judilibre.py` (mirroring the
+  existing `fonds/juri.py` pattern) for Judilibre's richer jurisprudence
+  API, since `pylegifrance` only covers Légifrance's own JURI fond today.
+- This keeps real reuse (auth, request/response modeling, existing tool
+  surface) while fixing the one thing that didn't fit (the proxy
+  dependency) and adding the one thing that was missing (Judilibre).
 
 ## Decided
 
@@ -80,28 +105,34 @@ record rather than as a live tradeoff.
   bottleneck here is network I/O to the APIs, where Python/Node are a
   wash) but because `pylegifrance` already exists as a working reference
   for this API's auth flow, pagination, and quirks.
-- **MVP tool scope** (approved by project owner):
-  1. `get_article` — fetch a specific article by code name + article
-     number, current consolidated version.
-  2. `search_texts` — full-text search across codes/laws for a keyword
-     or phrase, returning matching articles/texts with references.
-  3. `get_text_history` — show how an article/text changed over time
-     (versions, effective dates), using Légifrance's native versioning.
-  4. `search_jurisprudence` — keyword/date/jurisdiction search over case
-     law via Judilibre, returning decision summaries + references.
-  5. `get_decision` — fetch the full text of a specific court decision
-     by its Judilibre ID.
-- **Code identification (`get_article`/`search_texts`):** callers pass
-  the human-readable code name (e.g. "Code civil"), not Légifrance's
-  internal code ID (CID). The server resolves name → CID via a static
-  mapping of the ~80 official codes, built once from Légifrance's code
-  list rather than hardcoded by hand. This is more natural for an LLM
-  caller than requiring an opaque internal ID.
-- **`search_texts` scope:** limited to Légifrance's LEGI corpus — codes
-  plus other consolidated legislative/regulatory texts — not JORF
-  announcement texts or other fonds (CNIL, DOLE, etc.). This matches
-  the doc's "codes/laws" framing and keeps the tool's result shape
-  predictable for v1.
+- **MVP tool scope** (revised after inspecting the forked code — the
+  library already does more of this than assumed):
+  1. `rechercher_code` (existing) — search/fetch articles within a
+     French code by name + keyword/article number, backed by
+     `fonds.code.Code.search()` / `.fetch_article()`. `pylegifrance`'s
+     `NomCode` enum already covers the ~78 official code names, so
+     callers pass human-readable names ("Code civil") directly — no
+     separate name→ID mapping needs to be built.
+  2. `rechercher_dans_texte_legal` (existing) — search within LODA texts
+     (lois, ordonnances, décrets, arrêtés) by text ID or keyword, backed
+     by `fonds.loda`.
+  3. `get_text_history` (new, but thin) — how a text/article changed
+     over time. `fonds.loda.TexteLoda` already implements `.versions()`,
+     `.at(date)`, `get_modified_articles()`/`get_created_articles()`,
+     and `format_modifications_report()`/`to_markdown()` — this tool is
+     mostly exposing existing library methods, not building new logic.
+  4. `rechercher_jurisprudence_judiciaire` (existing) — keyword/date/
+     jurisdiction search over Légifrance's own JURI case-law fond.
+  5. `rechercher_jurisprudence_judilibre` (new) — equivalent search over
+     Judilibre, via the new `fonds/judilibre.py` added to the library
+     fork (richer jurisprudence API Légifrance's own JURI fond doesn't
+     cover — see Approaches).
+  Tool 1–2 and 4 keep their existing French names/shapes from the
+  forked server rather than being renamed, since they already fit.
+- **`search_texts`/LODA scope:** limited to Légifrance's LEGI corpus —
+  codes plus other consolidated legislative/regulatory texts — not JORF
+  announcement texts or other fonds (CNIL, DOLE, etc.), matching what
+  `fonds.code`/`fonds.loda` already cover.
 - **Definition of done for v1:** a working server validated against the
   **sandbox** environment is sufficient. Production credentials/CGU are
   a later step once the sandbox version is stable, not a v1 blocker —
@@ -110,22 +141,36 @@ record rather than as a live tradeoff.
 
 ## Left to the builder
 
-- MCP SDK choice (official Python MCP SDK) and project scaffolding
-  (packaging, entrypoint, dependency management).
-- OAuth2 client-credentials token handling: fetching, caching, and
-  refreshing the access token against PISTE's token endpoint, with
-  sandbox vs. prod endpoints/credentials selected via configuration
-  (e.g. environment variables), not hardcoded.
-- Exact endpoint mapping for each tool against the Légifrance/Judilibre
-  Swagger docs (and optionally cross-checked against `pylegifrance`'s
-  implementation).
+- Replacing `server.py`'s proxy-backed `make_api_request`/`API_KEY`/
+  `API_URL` plumbing with direct use of `pylegifrance`'s
+  `LegifranceClient`/`AuthenticationManager`/`ApiConfig`, wired to this
+  project's own PISTE sandbox `client_id`/`client_secret`.
+- `ApiConfig.from_env()` currently hardcodes production PISTE URLs
+  (`api.piste.gouv.fr`, `oauth.piste.gouv.fr`); it needs sandbox URL
+  support (PISTE's sandbox host) selectable via configuration, not
+  hardcoded, consistent with "sandbox-only is enough for v1 done."
+- Designing and implementing `fonds/judilibre.py` in the library fork:
+  auth reuse (same `AuthenticationManager` pattern, Judilibre's own
+  base URL/token scope), request/response modeling mirroring
+  `fonds/juri.py`'s shape where sensible, and whatever Judilibre-specific
+  filters (jurisdiction, date range, publication status) its API exposes.
+- The new `rechercher_jurisprudence_judilibre` and `get_text_history`
+  tools in the server: input schema, and how much of the library's
+  return value (e.g. `TexteLoda.to_markdown()`'s full report vs. a
+  trimmed summary) to pass back to the calling LLM.
+- Attribution: adding the Licence Ouverte 2.0 source/date mention (a
+  source URL is likely available on the models already) to every tool's
+  output, across both existing and new tools.
 - Error handling for upstream API errors (401/403/404/500, empty
   results) surfaced as clear MCP tool errors rather than raw exceptions
-  or stack traces.
-- Response shaping: how much of the raw API payload to pass through
-  vs. trim/reformat per tool, balancing completeness against the
-  calling LLM's context budget.
+  or stack traces — the existing server's generic `try`/`except` is a
+  reasonable base but may need tightening once the proxy is gone.
 - Test strategy: mocking the HTTP layer rather than hitting the sandbox
-  API in CI.
+  API in CI (the forked repos currently have no visible test coverage
+  for `server.py`'s tool-calling layer; `pylegifrance` itself should
+  already have tests worth keeping green).
 - Instructions/config for running the server from Claude Desktop/Claude
   Code (MCP server registration, required env vars).
+- Whether/how to track upstream: keeping the `upstream` remotes useful
+  for pulling in `pylegifrance`'s future fixes (e.g. for `fonds/code`,
+  `fonds/loda`) without losing the Judilibre/auth changes made here.
