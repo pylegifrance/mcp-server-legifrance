@@ -32,8 +32,10 @@ from mcp.types import Tool, TextContent
 
 from pylegifrance import ApiConfig, LegifranceClient
 from pylegifrance.fonds.code import Code
+from pylegifrance.fonds.juri import JuriAPI
 from pylegifrance.fonds.loda import Loda
 from pylegifrance.models.code.enum import NomCode, TypeChampCode
+from pylegifrance.models.juri.search import SearchRequest as JuriSearchRequest
 from pylegifrance.models.loda.search import SearchRequest as LodaSearchRequest
 
 # Configuration du logging
@@ -137,6 +139,39 @@ async def call_rechercher_texte_legal(arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text="Aucun résultat.")]
 
     parts = [texte.to_markdown() for texte in results]
+    return [TextContent(type="text", text="\n\n---\n\n".join(parts))]
+
+
+# Les noms de paramètres historiques du tool diffèrent des noms de champs
+# de pylegifrance.models.juri.search.SearchRequest.
+_JURI_ARG_MAP = {
+    "search": "search",
+    "publication_bulletin": "publication_bulletin",
+    "sort": "sort",
+    "champ": "field",
+    "type_recherche": "search_type",
+    "juridiction_judiciaire": "juridiction_judiciaire",
+    "page_size": "page_size",
+    "fetch_all": "fetch_all",
+    "juri_keys": "keys",
+}
+
+
+async def call_rechercher_jurisprudence(arguments: dict) -> list[TextContent]:
+    """Implémente le tool rechercher_jurisprudence_judiciaire via pylegifrance.fonds.juri.JuriAPI."""
+    kwargs = {
+        new_key: arguments[old_key]
+        for old_key, new_key in _JURI_ARG_MAP.items()
+        if arguments.get(old_key) is not None
+    }
+    query = JuriSearchRequest(**kwargs)
+
+    results = JuriAPI(get_legifrance_client()).search(query)
+
+    if not results:
+        return [TextContent(type="text", text="Aucun résultat.")]
+
+    parts = [decision.to_markdown() for decision in results]
     return [TextContent(type="text", text="\n\n---\n\n".join(parts))]
 
 
@@ -381,8 +416,8 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             return await call_rechercher_code(arguments)
 
         elif name == "rechercher_jurisprudence_judiciaire":
-            result = await make_api_request("juri", arguments)
-            
+            return await call_rechercher_jurisprudence(arguments)
+
         else:
             raise ValueError(f"Outil inconnu: {name}")
         
