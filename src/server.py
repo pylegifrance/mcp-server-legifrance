@@ -32,6 +32,7 @@ from mcp.types import Tool, TextContent
 
 from pylegifrance import ApiConfig, LegifranceClient
 from pylegifrance.fonds.code import Code
+from pylegifrance.fonds.judilibre import JudilibreAPI, JudilibreClient
 from pylegifrance.fonds.juri import JuriAPI
 from pylegifrance.fonds.loda import Loda
 from pylegifrance.models.code.enum import NomCode, TypeChampCode
@@ -53,6 +54,21 @@ def get_legifrance_client() -> LegifranceClient:
     PISTE_ENV pour basculer sandbox/production) depuis l'environnement.
     """
     return LegifranceClient(ApiConfig.from_env())
+
+
+def get_judilibre_client() -> JudilibreClient:
+    """Construit un client Judilibre authentifié via PISTE.
+
+    Réutilise les identifiants PISTE de LEGIFRANCE_CLIENT_ID/SECRET et lit
+    en plus JUDILIBRE_KEY_ID (en-tête KeyId requis par Judilibre), qui doit
+    être défini avant même de tenter de construire un ApiConfig.
+    """
+    key_id = os.getenv("JUDILIBRE_KEY_ID")
+    if not key_id:
+        raise ValueError(
+            "La variable d'environnement JUDILIBRE_KEY_ID doit être définie"
+        )
+    return JudilibreClient(ApiConfig.from_env(), key_id=key_id)
 
 
 def _resolve_code_name(raw: str) -> NomCode | None:
@@ -175,21 +191,30 @@ async def call_rechercher_jurisprudence(arguments: dict) -> list[TextContent]:
     return [TextContent(type="text", text="\n\n---\n\n".join(parts))]
 
 
+async def call_rechercher_judilibre(arguments: dict) -> list[TextContent]:
+    """Implémente le tool rechercher_jurisprudence_judilibre via pylegifrance.fonds.judilibre.JudilibreAPI."""
+    try:
+        client = get_judilibre_client()
+    except ValueError as e:
+        return [TextContent(type="text", text=str(e))]
+
+    kwargs = {
+        key: arguments[key]
+        for key in ("jurisdiction", "chamber", "date_start", "date_end", "page_size")
+        if arguments.get(key) is not None
+    }
+    results = JudilibreAPI(client).search(arguments.get("search", ""), **kwargs)
+
+    if not results:
+        return [TextContent(type="text", text="Aucun résultat.")]
+
+    parts = [decision.to_markdown() for decision in results]
+    return [TextContent(type="text", text="\n\n---\n\n".join(parts))]
+
+
 # Création du serveur MCP
 server = Server("legifrance")
 
-# Utilitaires
-def clean_dict(d: dict) -> dict:
-    """
-    Supprime les clés dont la valeur est None pour optimiser les requêtes API.
-    
-    Args:
-        d (dict): Dictionnaire à nettoyer
-        
-    Returns:
-        dict: Dictionnaire sans les valeurs None
-    """
-    return {k: v for k, v in d.items() if v is not None}
 
 def rate_limit(calls: int, period: float):
     """
@@ -225,66 +250,6 @@ def rate_limit(calls: int, period: float):
             return await func(*args, **kwargs)
         return wrapper
     return decorator
-
-async def make_api_request(endpoint: str, data: Dict) -> Dict:
-    """
-    Fonction générique pour effectuer des requêtes API avec gestion d'erreurs.
-    
-    Args:
-        endpoint (str): Point de terminaison de l'API (sans le domaine)
-        data (Dict): Données à envoyer dans la requête
-    
-    Returns:
-        Dict: Résultat de la requête ou message d'erreur
-    """
-    try:
-        url = f"{API_URL}{endpoint}"
-        clean_data = clean_dict(data)
-        
-        logger.info(f"Envoi de requête à {endpoint} avec les données: {json.dumps(clean_data)}")
-        
-        res = requests.post(
-            url,
-            headers=HEADERS,
-            params={"api_key": API_KEY},
-            json=clean_data,
-            timeout=30  # Timeout explicite pour éviter les blocages
-        )
-        
-
-        content_type = res.headers.get("Content-Type", "")
-        response_body = res.text      
-        
-        if res.ok:
-            try:
-                result = res.json()
-            except requests.exceptions.JSONDecodeError:
-                result = response_body  # fallback sur le texte brut
-
-            if isinstance(result, str):
-                result += "\n\n🔗 Mentionne systématiquement et impérativement le lien officiel dans ta réponse pour pouvoir y accéder."
-            return result
-        
-        if res.status_code == 422 or res.status_code == 404:
-            if "text/plain" in content_type:
-                return {"error": response_body}
-        
-        if "application/json" in content_type:
-           try:
-               return {"error": res.json()}
-           except requests.exceptions.JSONDecodeError:
-               return {"error": response_body}
-        
-        return {"error": f"Erreur {res.status_code} : {response_body}"}
-            
-    except requests.exceptions.RequestException as e:
-        logger.error("Erreur de connexion à l'API", exc_info=True)
-        return {"error": f"Erreur de connexion : {e}"}
-        
-    except Exception as e:
-        # Uniquement pour les erreurs de connexion ou autres problèmes graves
-        logger.error(f"Erreur de connexion: {str(e)}")
-        return {"error": f"Erreur de connexion: {str(e)}"}
 
 @server.list_tools()
 async def list_tools() -> List[Tool]:
@@ -390,6 +355,36 @@ async def list_tools() -> List[Tool]:
                 },
                 "required": ["search"]
             }
+        ),
+        Tool(
+            name="rechercher_jurisprudence_judilibre",
+            description="""
+            Recherche des décisions de justice via l'API Judilibre (Cour de cassation
+            et juridictions du fond), en complément de rechercher_jurisprudence_judiciaire.
+
+            Paramètres:
+                - search: Termes de recherche
+                - jurisdiction: Juridiction(s) à filtrer
+                - chamber: Chambre(s) à filtrer
+                - date_start: Date de début (YYYY-MM-DD)
+                - date_end: Date de fin (YYYY-MM-DD)
+                - page_size: Nombre de résultats (max 100)
+
+            Exemples:
+                - Recherche sur le licenciement: {search="licenciement sans cause réelle et sérieuse"}
+            """,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "search": {"type": "string"},
+                    "jurisdiction": {"type": "array", "items": {"type": "string"}},
+                    "chamber": {"type": "array", "items": {"type": "string"}},
+                    "date_start": {"type": "string"},
+                    "date_end": {"type": "string"},
+                    "page_size": {"type": "integer", "maximum": 100}
+                },
+                "required": ["search"]
+            }
         )
     ]
 
@@ -418,19 +413,12 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
         elif name == "rechercher_jurisprudence_judiciaire":
             return await call_rechercher_jurisprudence(arguments)
 
+        elif name == "rechercher_jurisprudence_judilibre":
+            return await call_rechercher_judilibre(arguments)
+
         else:
             raise ValueError(f"Outil inconnu: {name}")
-        
-        # Détection et traitement des erreurs
-        if isinstance(result, dict) and "error" in result:
-            return [TextContent(type="text", text=result["error"])]
-        
-        # Formatage du résultat
-        if isinstance(result, str):
-            return [TextContent(type="text", text=result)]
-        else:
-            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
-            
+
     except Exception as e:
         error_message = f"Erreur lors de l'exécution de {name}: {str(e)}"
         logger.error(error_message)
