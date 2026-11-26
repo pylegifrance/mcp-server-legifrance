@@ -1,0 +1,23 @@
+repos:
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: uv run mypy src
+        language: system
+        pass_filenames: false
+        files: \.py$
+
+      - id: basedpyright
+        name: basedpyright
+        entry: uv run basedpyright src tests
+        language: system
+        pass_filenames: false
+        files: \.py$
+
+      - id: pytest-cov
+        name: pytest (with 90% coverage floor)
+        entry: uv run pytest --cov=server --cov-report=term-missing
+        language: system
+        pass_filenames: false
+        files: \.py$
