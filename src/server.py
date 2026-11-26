@@ -22,6 +22,7 @@ import os
 import json
 import logging
 import asyncio
+import unicodedata
 from typing import Any, Dict, Optional, List, Sequence
 from functools import wraps
 from datetime import datetime
@@ -99,15 +100,23 @@ def get_judilibre_client() -> JudilibreClient:
     return _judilibre_client
 
 
+def _fold(value: str) -> str:
+    """Case- and accent-insensitive normalization (e.g. "Code pénal" and
+    "code penal" both fold to "code penal")."""
+    decomposed = unicodedata.normalize("NFKD", value.strip().casefold())
+    return "".join(c for c in decomposed if not unicodedata.combining(c))
+
+
 def _resolve_code_name(raw: str) -> NomCode | None:
     """Résout un nom de code saisi par l'appelant vers un membre de NomCode.
 
-    Comparaison insensible à la casse sur la valeur officielle (ex: "code
-    civil" -> NomCode.CC). Retourne None si aucun code ne correspond.
+    Comparaison insensible à la casse et aux accents sur la valeur
+    officielle (ex: "code civil" ou "Code penal" -> NomCode.CC / NomCode.CPD).
+    Retourne None si aucun code ne correspond.
     """
-    normalized = raw.strip().casefold()
+    normalized = _fold(raw)
     for member in NomCode:
-        if member.value.casefold() == normalized:
+        if _fold(member.value) == normalized:
             return member
     return None
 
@@ -213,6 +222,8 @@ def _format_article(article) -> str:
         lines.append(f"**Titre**: {article.title}")
     if article.legal_status:
         lines.append(f"**État**: {article.legal_status}")
+    if article.version_date:
+        lines.append(f"**Version du**: {article.version_date.strftime('%d/%m/%Y')}")
     if article.url:
         lines.append(f"**URL**: {article.url}")
     lines.append("")
@@ -255,7 +266,6 @@ _JURI_ARG_MAP = {
     "proximite": "proximity",
     "juridiction_judiciaire": "juridiction_judiciaire",
     "page_size": "page_size",
-    "fetch_all": "fetch_all",
     "juri_keys": "keys",
 }
 
@@ -269,7 +279,11 @@ async def call_rechercher_jurisprudence(arguments: dict) -> list[TextContent]:
     }
     if "search_type" in kwargs:
         kwargs["search_type"] = _normalize_type_recherche(kwargs["search_type"])
-    if "page_size" in kwargs:
+    # JuriSearchRequest.fetch_all is never read by JuriAPI.search(); request
+    # the largest single page instead, matching rechercher_code's behavior.
+    if arguments.get("fetch_all"):
+        kwargs["page_size"] = _MAX_PAGE_SIZE
+    elif "page_size" in kwargs:
         kwargs["page_size"] = _clamp_page_size(kwargs["page_size"])
     query = JuriSearchRequest(**kwargs)
 
@@ -319,12 +333,15 @@ def _resolve_loda_text(loda: Loda, text_id: str):
         if texte is not None:
             return texte
     except Exception:
+        # text_id not matching the LEGITEXT/JORFTEXT shape .fetch() expects
+        # (e.g. "78-17") is an expected outcome here, not a real failure --
+        # fall through to resolving it via search instead.
         pass
 
-    try:
-        matches = loda.search(LodaSearchRequest(text_id=text_id))
-    except Exception:
-        return None
+    # From here on, a failure is a real backend problem (auth, network,
+    # 5xx), not "this text doesn't exist" -- let it propagate so the caller
+    # can report it distinctly from an actual empty result.
+    matches = loda.search(LodaSearchRequest(text_id=text_id))
     if not matches:
         return None
 
@@ -332,17 +349,17 @@ def _resolve_loda_text(loda: Loda, text_id: str):
     if matched_id is None:
         return None
 
-    try:
-        return loda.fetch(matched_id)
-    except Exception:
-        return None
+    return loda.fetch(matched_id)
 
 
 async def call_get_text_history(arguments: dict) -> list[TextContent]:
     """Implémente le tool get_text_history via pylegifrance.fonds.loda.Loda."""
     text_id = arguments.get("text_id", "")
     loda = Loda(get_legifrance_client())
-    texte = _resolve_loda_text(loda, text_id)
+    try:
+        texte = _resolve_loda_text(loda, text_id)
+    except Exception as exc:
+        return [TextContent(type="text", text=f"Erreur lors de la consultation: {exc}")]
 
     if texte is None:
         return [TextContent(type="text", text="Aucun résultat.")]
@@ -428,7 +445,7 @@ async def call_list_tools() -> List[Tool]:
                 - champ: Champ de recherche ("ALL", "TITLE", "TABLE", "NUM_ARTICLE", "ARTICLE")
                 - type_recherche: Type de recherche ("TOUS_LES_MOTS_DANS_UN_CHAMP", "EXPRESSION_EXACTE", "AU_MOINS_UN_MOT")
                 - proximite: Distance maximale en mots entre les termes recherchés
-                - page_size: Nombre de résultats (max 100)
+                - page_size: Nombre de résultats (max 20)
 
             Exemples:
                 - Pour l'article 7 de la loi 78-17: {text_id="78-17", search="7", champ="NUM_ARTICLE"}
@@ -442,7 +459,7 @@ async def call_list_tools() -> List[Tool]:
                     "champ": {"type": "string", "enum": ["ALL", "TITLE", "TABLE", "NUM_ARTICLE", "ARTICLE"]},
                     "type_recherche": {"type": "string", "enum": ["TOUS_LES_MOTS_DANS_UN_CHAMP", "EXPRESSION_EXACTE", "AU_MOINS_UN_MOT"]},
                     "proximite": {"type": "integer", "minimum": 1, "maximum": 100},
-                    "page_size": {"type": "integer", "maximum": 100}
+                    "page_size": {"type": "integer", "maximum": 20}
                 }
             }
         ),
@@ -458,8 +475,8 @@ async def call_list_tools() -> List[Tool]:
                 - sort: Tri des résultats ("PERTINENCE", "DATE_ASC", "DATE_DESC")
                 - type_recherche: Type de recherche
                 - proximite: Distance maximale en mots entre les termes recherchés
-                - page_size: Nombre de résultats (max 100)
-                - fetch_all: Récupérer tous les résultats
+                - page_size: Nombre de résultats (max 20)
+                - fetch_all: Utiliser la taille de page maximale (20) plutôt que la valeur par défaut
 
             Exemples:
                 - Pour le PACS dans le Code civil: {search="pacte civil de solidarité", code_name="Code civil"}
@@ -473,7 +490,7 @@ async def call_list_tools() -> List[Tool]:
                     "sort": {"type": "string", "enum": ["PERTINENCE", "DATE_ASC", "DATE_DESC"]},
                     "type_recherche": {"type": "string"},
                     "proximite": {"type": "integer", "minimum": 1, "maximum": 100},
-                    "page_size": {"type": "integer", "maximum": 100},
+                    "page_size": {"type": "integer", "maximum": 20},
                     "fetch_all": {"type": "boolean"}
                 },
                 "required": ["search", "code_name"]
@@ -491,19 +508,19 @@ async def call_list_tools() -> List[Tool]:
                 - champ: Champ de recherche ("ALL", "TITLE", "ABSTRATS", "TEXTE", "RESUMES", "NUM_AFFAIRE")
                 - type_recherche: Type de recherche
                 - proximite: Distance maximale en mots entre les termes recherchés
-                - page_size: Nombre de résultats (max. 100)
-                - fetch_all: Récupérer tous les résultats
+                - page_size: Nombre de résultats (max. 20)
+                - fetch_all: Utiliser la taille de page maximale (20) plutôt que la valeur par défaut
                 - juri_keys: Mots-clés pour extraire des champs comme 'titre'. Par défaut, le titre, le texte et les résumés sont extraits
                 - juridiction_judiciaire: Liste des juridictions à inclure parmi ['Cour de cassation', 'Juridictions d'appel', ]
-            
-            Exemples : 
-                - Obtenir un panorama de la jurisprudence par mots clés : 
-                    search = "tierce opposition salarié société liquidation", page_size=100, juri_keys=['titre']
-                - Obtenir toutes les jurisprudences sur la signature électronique : 
+
+            Exemples :
+                - Obtenir un panorama de la jurisprudence par mots clés :
+                    search = "tierce opposition salarié société liquidation", page_size=20, juri_keys=['titre']
+                - Obtenir le maximum de jurisprudences sur la signature électronique :
                     search = "signature électronique", fetch_all=True, juri_keys=['titre', 'sommaire']
                 - Obtenir les 20 dernières jurisprudences sur la signature électronique des juridictions d'appel
                  search = "signature électronique", page_size, sort='DATE_DESC', juridiction_judiciaire=['Juridictions d'appel']]
-            
+
             """,
             inputSchema={
                 "type": "object",
@@ -514,7 +531,7 @@ async def call_list_tools() -> List[Tool]:
                     "champ": {"type": "string"},
                     "type_recherche": {"type": "string"},
                     "proximite": {"type": "integer", "minimum": 1, "maximum": 100},
-                    "page_size": {"type": "integer", "maximum": 100},
+                    "page_size": {"type": "integer", "maximum": 20},
                     "fetch_all": {"type": "boolean"},
                     "juri_keys": {"type": "array", "items": {"type": "string"}},
                     "juridiction_judiciaire": {"type": "array", "items": {"type": "string"}}
@@ -534,7 +551,7 @@ async def call_list_tools() -> List[Tool]:
                 - chamber: Chambre(s) à filtrer
                 - date_start: Date de début (YYYY-MM-DD)
                 - date_end: Date de fin (YYYY-MM-DD)
-                - page_size: Nombre de résultats (max 100)
+                - page_size: Nombre de résultats (max 20)
 
             Exemples:
                 - Recherche sur le licenciement: {search="licenciement sans cause réelle et sérieuse"}
@@ -547,7 +564,7 @@ async def call_list_tools() -> List[Tool]:
                     "chamber": {"type": "array", "items": {"type": "string"}},
                     "date_start": {"type": "string"},
                     "date_end": {"type": "string"},
-                    "page_size": {"type": "integer", "maximum": 100}
+                    "page_size": {"type": "integer", "maximum": 20}
                 },
                 "required": ["search"]
             }

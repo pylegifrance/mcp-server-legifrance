@@ -2,7 +2,19 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from server import call_list_tools, dispatch_tool_call, rate_limit
+from server import _MAX_PAGE_SIZE, call_list_tools, dispatch_tool_call, rate_limit
+
+
+@pytest.mark.asyncio
+async def test_page_size_schemas_advertise_the_real_clamp():
+    """page_size is silently clamped to _MAX_PAGE_SIZE by _clamp_page_size();
+    the advertised schema maximum must match, or a caller tuning page_size
+    off the schema gets far fewer results than the schema promised."""
+    tools = await call_list_tools()
+    for tool in tools:
+        page_size_schema = tool.inputSchema["properties"].get("page_size")
+        if page_size_schema is not None:
+            assert page_size_schema["maximum"] == _MAX_PAGE_SIZE, tool.name
 
 
 @pytest.mark.asyncio

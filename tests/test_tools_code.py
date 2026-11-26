@@ -1,8 +1,18 @@
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from server import call_rechercher_code
+from server import _resolve_code_name, call_rechercher_code
+
+
+def test_resolve_code_name_is_accent_tolerant():
+    """The implementation plan requires a "case/accent-tolerant match" --
+    an LLM caller or user commonly drops accents (e.g. "Code penal")."""
+    from pylegifrance.models.code.enum import NomCode
+
+    assert _resolve_code_name("Code penal") == NomCode.CPD
+    assert _resolve_code_name("code pénal") == NomCode.CPD
 
 
 @pytest.mark.asyncio
@@ -36,6 +46,7 @@ async def test_returns_formatted_articles_on_success(monkeypatch):
         legal_status="VIGUEUR",
         url="https://www.legifrance.gouv.fr/codes/article_lc/LEGIARTI000006438834",
         content="Tout fait quelconque de l'homme...",
+        version_date=datetime(2020, 1, 1),
     )
     with patch("server.Code") as mock_code_cls:
         (
@@ -47,6 +58,7 @@ async def test_returns_formatted_articles_on_success(monkeypatch):
         )
     assert "1240" in result[0].text
     assert "responsabilité" in result[0].text.lower()
+    assert "01/01/2020" in result[0].text
 
 
 @pytest.mark.asyncio

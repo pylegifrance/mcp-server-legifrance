@@ -8,6 +8,7 @@ from server import (
     _MAX_RESULTS_PER_RESPONSE,
     _format_results,
     call_rechercher_code,
+    call_rechercher_jurisprudence,
 )
 
 
@@ -41,3 +42,19 @@ async def test_rechercher_code_clamps_oversized_page_size(monkeypatch):
         )
 
     builder.paginate.assert_called_once_with(page_size=_MAX_PAGE_SIZE)
+
+
+@pytest.mark.asyncio
+async def test_rechercher_jurisprudence_fetch_all_uses_max_page_size(monkeypatch):
+    """pylegifrance's JuriSearchRequest.fetch_all field is never read by
+    JuriAPI.search() -- forwarding it is a no-op. fetch_all must instead
+    request the largest single page, like rechercher_code already does."""
+    monkeypatch.setenv("LEGIFRANCE_CLIENT_ID", "id")
+    monkeypatch.setenv("LEGIFRANCE_CLIENT_SECRET", "secret")
+
+    with patch("server.JuriAPI") as mock_juri_cls:
+        mock_juri_cls.return_value.search.return_value = []
+        await call_rechercher_jurisprudence({"search": "x", "fetch_all": True})
+
+    query = mock_juri_cls.return_value.search.call_args.args[0]
+    assert query.page_size == _MAX_PAGE_SIZE

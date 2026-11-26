@@ -89,12 +89,36 @@ async def test_versions_failure_does_not_crash_the_tool(monkeypatch):
     assert "Loi 78-17" in result[0].text
 
 
-def test_resolve_loda_text_returns_none_when_search_raises():
+@pytest.mark.asyncio
+async def test_backend_failure_is_reported_distinctly_from_no_results(monkeypatch):
+    """A real backend failure (auth, network, 5xx) while resolving text_id
+    must surface as an explicit error, not be indistinguishable from
+    "Aucun résultat." -- a caller needs to know the lookup failed rather
+    than concluding the text has no history."""
+    monkeypatch.setenv("LEGIFRANCE_CLIENT_ID", "id")
+    monkeypatch.setenv("LEGIFRANCE_CLIENT_SECRET", "secret")
+    with patch("server.Loda") as mock_loda_cls:
+        mock_loda_cls.return_value.fetch.return_value = None
+        mock_loda_cls.return_value.search.side_effect = RuntimeError("503 Service Unavailable")
+        result = await call_get_text_history({"text_id": "78-17"})
+
+    assert "aucun résultat" not in result[0].text.lower()
+    assert "erreur" in result[0].text.lower()
+    assert "503" in result[0].text
+
+
+def test_resolve_loda_text_propagates_when_search_raises():
+    """Only the first fetch(text_id) attempt is allowed to fail silently
+    (an expected outcome for non-LEGITEXT inputs like "78-17"). A failure
+    of the fallback search itself is a real backend problem (auth,
+    network, 5xx) and must not be reported as if the text simply doesn't
+    exist."""
     loda = MagicMock()
     loda.fetch.return_value = None
     loda.search.side_effect = RuntimeError("boom")
 
-    assert _resolve_loda_text(loda, "78-17") is None
+    with pytest.raises(RuntimeError, match="boom"):
+        _resolve_loda_text(loda, "78-17")
 
 
 def test_resolve_loda_text_returns_none_when_matched_id_is_none():
@@ -105,7 +129,7 @@ def test_resolve_loda_text_returns_none_when_matched_id_is_none():
     assert _resolve_loda_text(loda, "78-17") is None
 
 
-def test_resolve_loda_text_returns_none_when_second_fetch_raises():
+def test_resolve_loda_text_propagates_when_second_fetch_raises():
     match = MagicMock(id="LEGITEXT000006069095")
 
     def fake_fetch(text_id):
@@ -117,4 +141,5 @@ def test_resolve_loda_text_returns_none_when_second_fetch_raises():
     loda.fetch.side_effect = fake_fetch
     loda.search.return_value = [match]
 
-    assert _resolve_loda_text(loda, "78-17") is None
+    with pytest.raises(RuntimeError, match="boom"):
+        _resolve_loda_text(loda, "78-17")
