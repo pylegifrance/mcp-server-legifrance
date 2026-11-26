@@ -31,6 +31,8 @@ from mcp.server import Server
 from mcp.types import Tool, TextContent
 
 from pylegifrance import ApiConfig, LegifranceClient
+from pylegifrance.fonds.code import Code
+from pylegifrance.models.code.enum import NomCode, TypeChampCode
 
 # Configuration du logging
 logging.basicConfig(level=logging.INFO)
@@ -47,6 +49,75 @@ def get_legifrance_client() -> LegifranceClient:
     PISTE_ENV pour basculer sandbox/production) depuis l'environnement.
     """
     return LegifranceClient(ApiConfig.from_env())
+
+
+def _resolve_code_name(raw: str) -> NomCode | None:
+    """Résout un nom de code saisi par l'appelant vers un membre de NomCode.
+
+    Comparaison insensible à la casse sur la valeur officielle (ex: "code
+    civil" -> NomCode.CC). Retourne None si aucun code ne correspond.
+    """
+    normalized = raw.strip().casefold()
+    for member in NomCode:
+        if member.value.casefold() == normalized:
+            return member
+    return None
+
+
+_CHAMP_TO_TYPE_CHAMP_CODE = {
+    "ALL": TypeChampCode.ALL,
+    "TITLE": TypeChampCode.TITLE,
+    "TABLE": TypeChampCode.TABLE,
+    "ARTICLE": TypeChampCode.ARTICLE,
+}
+
+
+async def call_rechercher_code(arguments: dict) -> list[TextContent]:
+    """Implémente le tool rechercher_code via pylegifrance.fonds.code.Code."""
+    code_name_raw = arguments.get("code_name", "")
+    resolved = _resolve_code_name(code_name_raw)
+    if resolved is None:
+        examples = ", ".join(member.value for member in list(NomCode)[:5])
+        message = (
+            f"Code juridique inconnu: {code_name_raw!r}. "
+            f"Exemples de codes valides: {examples}, ..."
+        )
+        return [TextContent(type="text", text=message)]
+
+    builder = Code(get_legifrance_client()).search().in_code(resolved).with_formatter()
+
+    search_text = arguments.get("search")
+    champ = arguments.get("champ")
+    if champ == "NUM_ARTICLE":
+        builder = builder.article_number(search_text)
+    elif search_text:
+        field = _CHAMP_TO_TYPE_CHAMP_CODE.get(champ, TypeChampCode.ALL)
+        builder = builder.text(search_text, in_field=field)
+
+    page_size = 100 if arguments.get("fetch_all") else arguments.get("page_size")
+    if page_size:
+        builder = builder.paginate(page_size=page_size)
+
+    results = builder.execute()
+
+    if not results:
+        return [TextContent(type="text", text="Aucun résultat.")]
+
+    parts = []
+    for article in results:
+        lines = [f"## {article.code_name or ''} — art. {article.number}".strip()]
+        if article.title:
+            lines.append(f"**Titre**: {article.title}")
+        if article.legal_status:
+            lines.append(f"**État**: {article.legal_status}")
+        if article.url:
+            lines.append(f"**URL**: {article.url}")
+        lines.append("")
+        if article.content:
+            lines.append(article.content)
+        parts.append("\n".join(lines))
+
+    return [TextContent(type="text", text="\n\n---\n\n".join(parts))]
 
 
 # Création du serveur MCP
@@ -285,10 +356,10 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
         
         if name == "rechercher_dans_texte_legal":
             result = await make_api_request("loda", arguments)
-            
+
         elif name == "rechercher_code":
-            result = await make_api_request("code", arguments)
-            
+            return await call_rechercher_code(arguments)
+
         elif name == "rechercher_jurisprudence_judiciaire":
             result = await make_api_request("juri", arguments)
             
