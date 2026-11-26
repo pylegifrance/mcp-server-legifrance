@@ -20,8 +20,12 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "basedpyright>=1.40.2",
+    "mypy>=2.4.1",
+    "pre-commit>=4.7.0",
     "pytest>=8.3.5",
     "pytest-asyncio>=0.24.0",
+    "pytest-cov>=7.1.0",
 ]
 
 [tool.pytest.ini_options]
@@ -31,3 +35,38 @@ asyncio_default_fixture_loop_scope = "function"
 
 [tool.uv.sources]
 pylegifrance = { path = "../pylegifrance", editable = true }
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+]
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+# mcp's own type stubs are incomplete for this SDK surface; pylegifrance's
+# py.typed marker isn't present in this checkout despite being declared in
+# its package-data, so its editable install isn't recognized as typed.
+module = ["mcp.*", "pylegifrance.*"]
+ignore_missing_imports = true
+
+[tool.basedpyright]
+include = ["src", "tests"]
+extraPaths = ["../pylegifrance", "src"]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+reportMissingImports = true

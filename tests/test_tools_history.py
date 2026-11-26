@@ -2,7 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from server import call_get_text_history
+from server import _resolve_loda_text, call_get_text_history
 
 
 @pytest.mark.asyncio
@@ -66,3 +66,34 @@ async def test_includes_version_history_section(monkeypatch):
 
     assert "01/01/2020" in result[0].text
     assert "VIGUEUR" in result[0].text
+
+
+def test_resolve_loda_text_returns_none_when_search_raises():
+    loda = MagicMock()
+    loda.fetch.return_value = None
+    loda.search.side_effect = RuntimeError("boom")
+
+    assert _resolve_loda_text(loda, "78-17") is None
+
+
+def test_resolve_loda_text_returns_none_when_matched_id_is_none():
+    loda = MagicMock()
+    loda.fetch.return_value = None
+    loda.search.return_value = [MagicMock(id=None)]
+
+    assert _resolve_loda_text(loda, "78-17") is None
+
+
+def test_resolve_loda_text_returns_none_when_second_fetch_raises():
+    match = MagicMock(id="LEGITEXT000006069095")
+
+    def fake_fetch(text_id):
+        if text_id == "LEGITEXT000006069095":
+            raise RuntimeError("boom")
+        return None
+
+    loda = MagicMock()
+    loda.fetch.side_effect = fake_fetch
+    loda.search.return_value = [match]
+
+    assert _resolve_loda_text(loda, "78-17") is None

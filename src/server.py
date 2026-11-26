@@ -28,7 +28,7 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 from mcp.server import Server
-from mcp.types import Tool, TextContent
+from mcp.types import GetPromptResult, Prompt, PromptArgument, PromptMessage, TextContent, Tool
 
 from pylegifrance import ApiConfig, LegifranceClient
 from pylegifrance.fonds.code import Code
@@ -189,10 +189,10 @@ async def call_rechercher_code(arguments: dict) -> list[TextContent]:
 
     search_text = arguments.get("search")
     champ = arguments.get("champ")
-    if champ == "NUM_ARTICLE":
+    if champ == "NUM_ARTICLE" and search_text:
         builder = builder.article_number(search_text)
     elif search_text:
-        field = _CHAMP_TO_TYPE_CHAMP_CODE.get(champ, TypeChampCode.ALL)
+        field = _CHAMP_TO_TYPE_CHAMP_CODE.get(champ, TypeChampCode.ALL) if champ else TypeChampCode.ALL
         builder = builder.text(search_text, in_field=field)
 
     page_size = _clamp_page_size(100 if arguments.get("fetch_all") else arguments.get("page_size"))
@@ -325,8 +325,12 @@ def _resolve_loda_text(loda: Loda, text_id: str):
     if not matches:
         return None
 
+    matched_id = matches[0].id
+    if matched_id is None:
+        return None
+
     try:
-        return loda.fetch(matches[0].id)
+        return loda.fetch(matched_id)
     except Exception:
         return None
 
@@ -398,8 +402,7 @@ def rate_limit(calls: int, period: float):
         return wrapper
     return decorator
 
-@server.list_tools()
-async def list_tools() -> List[Tool]:
+async def call_list_tools() -> List[Tool]:
     """Liste tous les outils disponibles dans ce serveur MCP."""
     return [
         Tool(
@@ -556,28 +559,27 @@ async def list_tools() -> List[Tool]:
         )
     ]
 
-@server.call_tool()
-# Note: ce quota n'est pas celui de l'ancien proxy dassignies.law (qui imposait
-# 5 appels/s à ses propres utilisateurs). PISTE applique un quota propre à
-# chaque application, non publié publiquement : consultez le vôtre sur
-# piste.gouv.fr (Applications > Actions > Consulter les quotas) et ajustez
-# cette valeur en conséquence. 5/s est conservé ici comme valeur de départ
-# prudente en l'absence de données sur votre quota réel.
-@rate_limit(calls=5, period=1.0)
-async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
+
+@server.list_tools()
+async def list_tools() -> List[Tool]:
+    return await call_list_tools()
+
+
+async def dispatch_tool_call(name: str, arguments: Any) -> Sequence[TextContent]:
     """
-    Gère les appels aux outils juridiques.
-    
+    Logique de dispatch des appels d'outils (séparée du décorateur MCP et
+    du rate limiting pour rester directement testable).
+
     Args:
         name (str): Nom de l'outil à appeler
         arguments (Any): Arguments à passer à l'outil
-    
+
     Returns:
         Sequence[TextContent]: Résultat de l'appel
     """
     try:
         logger.info(f"Appel de l'outil: {name} avec arguments: {json.dumps(arguments)}")
-        
+
         if name == "rechercher_dans_texte_legal":
             return await call_rechercher_texte_legal(arguments)
 
@@ -601,11 +603,33 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
         logger.error(error_message)
         return [TextContent(type="text", text=error_message)]
 
-@server.list_prompts()
-async def list_prompts():
+
+@server.call_tool()
+# Note: ce quota n'est pas celui de l'ancien proxy dassignies.law (qui imposait
+# 5 appels/s à ses propres utilisateurs). PISTE applique un quota propre à
+# chaque application, non publié publiquement : consultez le vôtre sur
+# piste.gouv.fr (Applications > Actions > Consulter les quotas) et ajustez
+# cette valeur en conséquence. 5/s est conservé ici comme valeur de départ
+# prudente en l'absence de données sur votre quota réel.
+@rate_limit(calls=5, period=1.0)
+async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
+    return await dispatch_tool_call(name, arguments)
+
+_AGENT_JURIDIQUE_EXPERT_SYSTEM_PROMPT = (
+    "Tu es un agent juridique expert qui cite toujours ses sources dans le corps du texte.\n"
+    "Lorsque tu effectues une recherche et que des références sont citées (article d'un code, numéro de décision de justice), "
+    "tu dois systématiquement utiliser les outils à ta disposition pour aller chercher leur contenu et l'analyser. "
+    "Tu peux utiliser tous les outils disponibles pour rechercher des informations dans les textes de loi français ou la jurisprudence.\n"
+    "Tu dois :\n"
+    "- Expliquer ton raisonnement étape par étape\n"
+    "- Utiliser les outils pertinents\n"
+    "- Fournir une synthèse claire, sourcée, avec des liens vers les articles. "
+    "Tu dois impérativement récupérer les liens officiels et les citer."
+)
+
+
+async def call_list_prompts() -> list[Prompt]:
     """Liste tous les prompts disponibles dans ce serveur MCP."""
-    from mcp.types import Prompt, PromptArgument
-    
     return [
         Prompt(
             name="agent_juridique_expert",
@@ -620,54 +644,46 @@ async def list_prompts():
         )
     ]
 
-@server.get_prompt()
-async def get_prompt(prompt_name: str, inputs: dict) -> Dict:
+
+async def call_get_prompt(prompt_name: str, inputs: dict[str, str] | None) -> GetPromptResult:
     """
     Retourne un prompt prédéfini pour une utilisation spécifique.
-    
+
     Args:
-        prompt_name (str): Nom du prompt à récupérer
-        inputs (dict): Entrées pour le prompt
-    
+        prompt_name: Nom du prompt à récupérer
+        inputs: Entrées pour le prompt
+
     Returns:
-        Dict: Structure du prompt
+        Le résultat structuré attendu par le protocole MCP.
     """
-    if prompt_name == "agent_juridique_expert":
-        question = inputs.get("question", "")
-        return {
-            "messages": [
-                {
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                "Tu es un agent juridique expert qui cite toujours ses sources dans le corps du texte.\n"
-                                "Lorsque tu effectues une recherche et que des références sont citées (article d'un code, numéro de décision de justice), "
-                                "tu dois systématiquement utiliser les outils à ta disposition pour aller chercher leur contenu et l'analyser. "
-                                "Tu peux utiliser tous les outils disponibles pour rechercher des informations dans les textes de loi français ou la jurisprudence.\n"
-                                "Tu dois :\n"
-                                "- Expliquer ton raisonnement étape par étape\n"
-                                "- Utiliser les outils pertinents\n"
-                                "- Fournir une synthèse claire, sourcée, avec des liens vers les articles. "
-                                "Tu dois impérativement récupérer les liens officiels et les citer."
-                            )
-                        }
-                    ]
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": f"Voici ma question juridique : {question}"
-                        }
-                    ]
-                }
-            ]
-        }
-    else:
+    if prompt_name != "agent_juridique_expert":
         raise ValueError(f"Prompt inconnu: {prompt_name}")
+
+    question = (inputs or {}).get("question", "")
+    return GetPromptResult(
+        messages=[
+            PromptMessage(
+                role="assistant",
+                content=TextContent(type="text", text=_AGENT_JURIDIQUE_EXPERT_SYSTEM_PROMPT),
+            ),
+            PromptMessage(
+                role="user",
+                content=TextContent(
+                    type="text", text=f"Voici ma question juridique : {question}"
+                ),
+            ),
+        ]
+    )
+
+
+@server.list_prompts()
+async def list_prompts() -> list[Prompt]:
+    return await call_list_prompts()
+
+
+@server.get_prompt()
+async def get_prompt(prompt_name: str, inputs: dict[str, str] | None) -> GetPromptResult:
+    return await call_get_prompt(prompt_name, inputs)
 
 async def main():
     """Point d'entrée principal du serveur MCP."""
