@@ -32,7 +32,12 @@ from mcp.types import Tool, TextContent
 
 from pylegifrance import ApiConfig, LegifranceClient
 from pylegifrance.fonds.code import Code
-from pylegifrance.fonds.judilibre import JudilibreAPI, JudilibreClient
+from pylegifrance.fonds.judilibre import (
+    JUDILIBRE_PROD_URL,
+    JUDILIBRE_SANDBOX_URL,
+    JudilibreAPI,
+    JudilibreClient,
+)
 from pylegifrance.fonds.juri import JuriAPI
 from pylegifrance.fonds.loda import Loda
 from pylegifrance.models.code.enum import NomCode, TypeChampCode
@@ -47,28 +52,51 @@ logger = logging.getLogger("legifrance_mcp")
 load_dotenv()
 
 
+_legifrance_client: LegifranceClient | None = None
+_judilibre_client: JudilibreClient | None = None
+
+_JUDILIBRE_URLS = {"sandbox": JUDILIBRE_SANDBOX_URL, "production": JUDILIBRE_PROD_URL}
+
+
 def get_legifrance_client() -> LegifranceClient:
-    """Construit un client Légifrance authentifié directement via PISTE.
+    """Construit (une seule fois par process) un client Légifrance
+    authentifié directement via PISTE.
 
     Lit LEGIFRANCE_CLIENT_ID/LEGIFRANCE_CLIENT_SECRET (et, optionnellement,
-    PISTE_ENV pour basculer sandbox/production) depuis l'environnement.
+    PISTE_ENV pour basculer sandbox/production) depuis l'environnement. Le
+    client est mis en cache pour que le jeton OAuth sous-jacent soit
+    réellement réutilisé d'un appel d'outil à l'autre, plutôt que renouvelé
+    à chaque appel.
     """
-    return LegifranceClient(ApiConfig.from_env())
+    global _legifrance_client
+    if _legifrance_client is None:
+        _legifrance_client = LegifranceClient(ApiConfig.from_env())
+    return _legifrance_client
 
 
 def get_judilibre_client() -> JudilibreClient:
-    """Construit un client Judilibre authentifié via PISTE.
+    """Construit (une seule fois par process) un client Judilibre
+    authentifié via PISTE.
 
-    Réutilise les identifiants PISTE de LEGIFRANCE_CLIENT_ID/SECRET et lit
+    Réutilise les identifiants PISTE de LEGIFRANCE_CLIENT_ID/SECRET, lit
     en plus JUDILIBRE_KEY_ID (en-tête KeyId requis par Judilibre), qui doit
-    être défini avant même de tenter de construire un ApiConfig.
+    être défini avant même de tenter de construire un ApiConfig, et dérive
+    l'URL Judilibre sandbox/production du même PISTE_ENV que le client
+    Légifrance plutôt que de rester figée en sandbox.
     """
-    key_id = os.getenv("JUDILIBRE_KEY_ID")
-    if not key_id:
-        raise ValueError(
-            "La variable d'environnement JUDILIBRE_KEY_ID doit être définie"
+    global _judilibre_client
+    if _judilibre_client is None:
+        key_id = os.getenv("JUDILIBRE_KEY_ID")
+        if not key_id:
+            raise ValueError(
+                "La variable d'environnement JUDILIBRE_KEY_ID doit être définie"
+            )
+        piste_env = os.getenv("PISTE_ENV", "sandbox").strip().lower()
+        api_url = _JUDILIBRE_URLS.get(piste_env, JUDILIBRE_SANDBOX_URL)
+        _judilibre_client = JudilibreClient(
+            ApiConfig.from_env(), key_id=key_id, api_url=api_url
         )
-    return JudilibreClient(ApiConfig.from_env(), key_id=key_id)
+    return _judilibre_client
 
 
 def _resolve_code_name(raw: str) -> NomCode | None:
@@ -82,6 +110,59 @@ def _resolve_code_name(raw: str) -> NomCode | None:
         if member.value.casefold() == normalized:
             return member
     return None
+
+
+_MAX_RESULTS_PER_RESPONSE = 10
+_MAX_PAGE_SIZE = 20
+_MAX_CHARS_PER_RESULT = 4000
+_MAX_CHARS_SINGLE_DOCUMENT = 8000
+
+_TYPE_RECHERCHE_MAP = {
+    # Legacy values from the old dassignies.law proxy that the underlying
+    # pylegifrance TypeRecherche enum doesn't accept.
+    "EXPRESSION_EXACTE": "EXACTE",
+    "AU_MOINS_UN_MOT": "UN_DES_MOTS",
+}
+
+
+def _normalize_type_recherche(value: str | None) -> str | None:
+    """Maps legacy type_recherche values to pylegifrance's canonical ones."""
+    if value is None:
+        return None
+    return _TYPE_RECHERCHE_MAP.get(value, value)
+
+
+def _truncate(text: str, limit: int = _MAX_CHARS_PER_RESULT) -> str:
+    """Caps a single result's length to stay within an LLM caller's context
+    budget, rather than inlining arbitrarily large content (full rulings,
+    whole laws) unbounded."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n\n*(contenu tronqué — affinez votre recherche pour un résultat plus précis)*"
+
+
+def _format_results(results: list, to_text) -> str:
+    """Formats a list of results as Markdown, bounded in both count and
+    per-result size so a broad search doesn't flood the calling LLM's
+    context budget."""
+    limited = results[:_MAX_RESULTS_PER_RESPONSE]
+    parts = [_truncate(to_text(item)) for item in limited]
+    output = "\n\n---\n\n".join(parts)
+    remaining = len(results) - len(limited)
+    if remaining > 0:
+        output += (
+            f"\n\n*({remaining} résultat(s) supplémentaire(s) non affiché(s) "
+            "— affinez votre recherche pour réduire le nombre de résultats)*"
+        )
+    return output
+
+
+def _clamp_page_size(value: int | None) -> int | None:
+    """Caps a caller-requested page_size so a single tool call can't fan
+    out into an unbounded number of upstream requests/results."""
+    if value is None:
+        return None
+    return min(value, _MAX_PAGE_SIZE)
 
 
 _CHAMP_TO_TYPE_CHAMP_CODE = {
@@ -114,7 +195,7 @@ async def call_rechercher_code(arguments: dict) -> list[TextContent]:
         field = _CHAMP_TO_TYPE_CHAMP_CODE.get(champ, TypeChampCode.ALL)
         builder = builder.text(search_text, in_field=field)
 
-    page_size = 100 if arguments.get("fetch_all") else arguments.get("page_size")
+    page_size = _clamp_page_size(100 if arguments.get("fetch_all") else arguments.get("page_size"))
     if page_size:
         builder = builder.paginate(page_size=page_size)
 
@@ -123,21 +204,21 @@ async def call_rechercher_code(arguments: dict) -> list[TextContent]:
     if not results:
         return [TextContent(type="text", text="Aucun résultat.")]
 
-    parts = []
-    for article in results:
-        lines = [f"## {article.code_name or ''} — art. {article.number}".strip()]
-        if article.title:
-            lines.append(f"**Titre**: {article.title}")
-        if article.legal_status:
-            lines.append(f"**État**: {article.legal_status}")
-        if article.url:
-            lines.append(f"**URL**: {article.url}")
-        lines.append("")
-        if article.content:
-            lines.append(article.content)
-        parts.append("\n".join(lines))
+    return [TextContent(type="text", text=_format_results(results, _format_article))]
 
-    return [TextContent(type="text", text="\n\n---\n\n".join(parts))]
+
+def _format_article(article) -> str:
+    lines = [f"## {article.code_name or ''} — art. {article.number}".strip()]
+    if article.title:
+        lines.append(f"**Titre**: {article.title}")
+    if article.legal_status:
+        lines.append(f"**État**: {article.legal_status}")
+    if article.url:
+        lines.append(f"**URL**: {article.url}")
+    lines.append("")
+    if article.content:
+        lines.append(article.content)
+    return "\n".join(lines)
 
 
 async def call_rechercher_texte_legal(arguments: dict) -> list[TextContent]:
@@ -147,6 +228,10 @@ async def call_rechercher_texte_legal(arguments: dict) -> list[TextContent]:
         for key in ("search", "text_id", "champ", "type_recherche", "page_size")
         if arguments.get(key) is not None
     }
+    if "type_recherche" in kwargs:
+        kwargs["type_recherche"] = _normalize_type_recherche(kwargs["type_recherche"])
+    if "page_size" in kwargs:
+        kwargs["page_size"] = _clamp_page_size(kwargs["page_size"])
     query = LodaSearchRequest(**kwargs)
 
     results = Loda(get_legifrance_client()).search(query)
@@ -154,8 +239,7 @@ async def call_rechercher_texte_legal(arguments: dict) -> list[TextContent]:
     if not results:
         return [TextContent(type="text", text="Aucun résultat.")]
 
-    parts = [texte.to_markdown() for texte in results]
-    return [TextContent(type="text", text="\n\n---\n\n".join(parts))]
+    return [TextContent(type="text", text=_format_results(results, lambda t: t.to_markdown()))]
 
 
 # Les noms de paramètres historiques du tool diffèrent des noms de champs
@@ -180,6 +264,10 @@ async def call_rechercher_jurisprudence(arguments: dict) -> list[TextContent]:
         for old_key, new_key in _JURI_ARG_MAP.items()
         if arguments.get(old_key) is not None
     }
+    if "search_type" in kwargs:
+        kwargs["search_type"] = _normalize_type_recherche(kwargs["search_type"])
+    if "page_size" in kwargs:
+        kwargs["page_size"] = _clamp_page_size(kwargs["page_size"])
     query = JuriSearchRequest(**kwargs)
 
     results = JuriAPI(get_legifrance_client()).search(query)
@@ -187,8 +275,7 @@ async def call_rechercher_jurisprudence(arguments: dict) -> list[TextContent]:
     if not results:
         return [TextContent(type="text", text="Aucun résultat.")]
 
-    parts = [decision.to_markdown() for decision in results]
-    return [TextContent(type="text", text="\n\n---\n\n".join(parts))]
+    return [TextContent(type="text", text=_format_results(results, lambda d: d.to_markdown()))]
 
 
 async def call_rechercher_judilibre(arguments: dict) -> list[TextContent]:
@@ -203,31 +290,73 @@ async def call_rechercher_judilibre(arguments: dict) -> list[TextContent]:
         for key in ("jurisdiction", "chamber", "date_start", "date_end", "page_size")
         if arguments.get(key) is not None
     }
+    if "page_size" in kwargs:
+        kwargs["page_size"] = _clamp_page_size(kwargs["page_size"])
     results = JudilibreAPI(client).search(arguments.get("search", ""), **kwargs)
 
     if not results:
         return [TextContent(type="text", text="Aucun résultat.")]
 
-    parts = [decision.to_markdown() for decision in results]
-    return [TextContent(type="text", text="\n\n---\n\n".join(parts))]
+    return [TextContent(type="text", text=_format_results(results, lambda d: d.to_markdown()))]
 
 
 _NO_IMPACT_SENTINEL = "Aucun impact disponible."
 
 
+def _resolve_loda_text(loda: Loda, text_id: str):
+    """Résout text_id vers le TexteLoda complet correspondant.
+
+    Accepte aussi bien un identifiant LEGITEXT/JORFTEXT direct (passé tel
+    quel à .fetch()) qu'un numéro "AAAA-NUMERO" (ex: "78-17"), qui doit
+    d'abord être résolu via une recherche — .fetch() seul ne l'accepte pas,
+    comme rechercher_dans_texte_legal le fait déjà pour ce même champ.
+    """
+    try:
+        texte = loda.fetch(text_id)
+        if texte is not None:
+            return texte
+    except Exception:
+        pass
+
+    try:
+        matches = loda.search(LodaSearchRequest(text_id=text_id))
+    except Exception:
+        return None
+    if not matches:
+        return None
+
+    try:
+        return loda.fetch(matches[0].id)
+    except Exception:
+        return None
+
+
 async def call_get_text_history(arguments: dict) -> list[TextContent]:
     """Implémente le tool get_text_history via pylegifrance.fonds.loda.Loda."""
     text_id = arguments.get("text_id", "")
-    texte = Loda(get_legifrance_client()).fetch(text_id)
+    loda = Loda(get_legifrance_client())
+    texte = _resolve_loda_text(loda, text_id)
 
     if texte is None:
         return [TextContent(type="text", text="Aucun résultat.")]
 
+    sections = []
+
+    versions = texte.versions()
+    if versions:
+        lines = ["## Versions"]
+        for version in versions:
+            start = version.date_debut.strftime("%d/%m/%Y") if version.date_debut else "?"
+            end = version.date_fin.strftime("%d/%m/%Y") if version.date_fin else "en cours"
+            lines.append(f"- {start} → {end} ({version.etat or '?'})")
+        sections.append("\n".join(lines))
+
     report = texte.format_modifications_report()
     if report.strip() == _NO_IMPACT_SENTINEL:
         report = texte.to_markdown()
+    sections.append(report)
 
-    return [TextContent(type="text", text=report)]
+    return [TextContent(type="text", text=_truncate("\n\n---\n\n".join(sections), _MAX_CHARS_SINGLE_DOCUMENT))]
 
 
 # Création du serveur MCP

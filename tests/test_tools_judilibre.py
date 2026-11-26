@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 import pytest
 
+import server
 from server import call_rechercher_judilibre
 
 
@@ -21,3 +22,16 @@ async def test_missing_key_id_fails_clearly(monkeypatch):
     monkeypatch.delenv("JUDILIBRE_KEY_ID", raising=False)
     result = await call_rechercher_judilibre({"search": "licenciement"})
     assert "judilibre_key_id" in result[0].text.lower()
+
+
+def test_production_env_uses_production_judilibre_url(monkeypatch):
+    from pylegifrance.fonds.judilibre import JUDILIBRE_PROD_URL
+
+    monkeypatch.setenv("LEGIFRANCE_CLIENT_ID", "id")
+    monkeypatch.setenv("LEGIFRANCE_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("JUDILIBRE_KEY_ID", "key-id")
+    monkeypatch.setenv("PISTE_ENV", "production")
+
+    client = server.get_judilibre_client()
+
+    assert client.api_url == JUDILIBRE_PROD_URL

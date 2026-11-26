@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -11,5 +11,58 @@ async def test_unknown_text_id_returns_explicit_message(monkeypatch):
     monkeypatch.setenv("LEGIFRANCE_CLIENT_SECRET", "secret")
     with patch("server.Loda") as mock_loda_cls:
         mock_loda_cls.return_value.fetch.return_value = None
+        mock_loda_cls.return_value.search.return_value = []
         result = await call_get_text_history({"text_id": "99-999"})
     assert "aucun résultat" in result[0].text.lower()
+
+
+@pytest.mark.asyncio
+async def test_resolves_law_number_via_search_before_fetching(monkeypatch):
+    """"78-17" isn't a LEGITEXT/JORFTEXT id that Loda.fetch() accepts
+    directly — it must be resolved via search first, like
+    rechercher_dans_texte_legal already does."""
+    monkeypatch.setenv("LEGIFRANCE_CLIENT_ID", "id")
+    monkeypatch.setenv("LEGIFRANCE_CLIENT_SECRET", "secret")
+
+    resolved_texte = MagicMock()
+    resolved_texte.format_modifications_report.return_value = "## Loi 78-17\n\nImpact détaillé"
+    resolved_texte.versions.return_value = []
+
+    match = MagicMock(id="LEGITEXT000006069095")
+
+    def fake_fetch(text_id):
+        if text_id == "LEGITEXT000006069095":
+            return resolved_texte
+        return None
+
+    with patch("server.Loda") as mock_loda_cls:
+        mock_loda_cls.return_value.fetch.side_effect = fake_fetch
+        mock_loda_cls.return_value.search.return_value = [match]
+        result = await call_get_text_history({"text_id": "78-17"})
+
+    assert "Impact détaillé" in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_includes_version_history_section(monkeypatch):
+    """The tool's own description promises version/history over time, not
+    just which articles the law touched elsewhere."""
+    monkeypatch.setenv("LEGIFRANCE_CLIENT_ID", "id")
+    monkeypatch.setenv("LEGIFRANCE_CLIENT_SECRET", "secret")
+
+    version = MagicMock()
+    version.date_debut.strftime.return_value = "01/01/2020"
+    version.date_fin = None
+    version.etat = "VIGUEUR"
+
+    texte = MagicMock()
+    texte.format_modifications_report.return_value = "Aucun impact disponible."
+    texte.to_markdown.return_value = "## Texte\n\ncontenu"
+    texte.versions.return_value = [version]
+
+    with patch("server.Loda") as mock_loda_cls:
+        mock_loda_cls.return_value.fetch.return_value = texte
+        result = await call_get_text_history({"text_id": "78-17"})
+
+    assert "01/01/2020" in result[0].text
+    assert "VIGUEUR" in result[0].text
