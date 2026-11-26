@@ -32,7 +32,9 @@ from mcp.types import Tool, TextContent
 
 from pylegifrance import ApiConfig, LegifranceClient
 from pylegifrance.fonds.code import Code
+from pylegifrance.fonds.loda import Loda
 from pylegifrance.models.code.enum import NomCode, TypeChampCode
+from pylegifrance.models.loda.search import SearchRequest as LodaSearchRequest
 
 # Configuration du logging
 logging.basicConfig(level=logging.INFO)
@@ -117,6 +119,24 @@ async def call_rechercher_code(arguments: dict) -> list[TextContent]:
             lines.append(article.content)
         parts.append("\n".join(lines))
 
+    return [TextContent(type="text", text="\n\n---\n\n".join(parts))]
+
+
+async def call_rechercher_texte_legal(arguments: dict) -> list[TextContent]:
+    """Implémente le tool rechercher_dans_texte_legal via pylegifrance.fonds.loda.Loda."""
+    kwargs = {
+        key: arguments.get(key)
+        for key in ("search", "text_id", "champ", "type_recherche", "page_size")
+        if arguments.get(key) is not None
+    }
+    query = LodaSearchRequest(**kwargs)
+
+    results = Loda(get_legifrance_client()).search(query)
+
+    if not results:
+        return [TextContent(type="text", text="Aucun résultat.")]
+
+    parts = [texte.to_markdown() for texte in results]
     return [TextContent(type="text", text="\n\n---\n\n".join(parts))]
 
 
@@ -355,7 +375,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
         logger.info(f"Appel de l'outil: {name} avec arguments: {json.dumps(arguments)}")
         
         if name == "rechercher_dans_texte_legal":
-            result = await make_api_request("loda", arguments)
+            return await call_rechercher_texte_legal(arguments)
 
         elif name == "rechercher_code":
             return await call_rechercher_code(arguments)
